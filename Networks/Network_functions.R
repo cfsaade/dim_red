@@ -1,0 +1,354 @@
+library(igraph)
+library(OCNet) # for riverine networks
+library(ggplot2)
+
+# Utility functions #######################################################################################
+    # functions to deal with networks: read/write to a folder, plot the netwok...
+
+
+  ## write_network ###########################################################################################
+    write_network = function(network, folder_name){
+      # writes all components of a network into a given folder
+      dir.create(folder_name, recursive = T)
+      write.table(network$summary, paste0(folder_name, '/summary'))
+      write.table(network$points_coords, paste0(folder_name, '/points_coords'))
+      write.table(network$distance_matrix, paste0(folder_name, '/distance_matrix'))
+      write.table(network$adjacency_matrix, paste0(folder_name, '/adjacency_matrix'))
+      write.table(network$dispersal_matrix, paste0(folder_name, '/dispersal_matrix'))
+      write.table(network$cov_matrix, paste0(folder_name, '/cov_matrix'))
+    }
+
+
+  ## read_network ############################################################################################
+    read_network = function(folder_name){
+      # reads all components of a network from a given folder
+      network = list()
+      
+      network$summary = read.table(paste0(folder_name, '/summary'), header = T)
+      
+      n_patch = network$summary$n_patch
+        
+      network$points_coords = read.table(paste0(folder_name, '/points_coords'), header = T)
+      network$distance_matrix = as.matrix(read.table(paste0(folder_name, '/distance_matrix')),
+                                          nrow = n_patch, ncol = n_patch)
+      network$adjacency_matrix = as.matrix(read.table(paste0(folder_name, '/adjacency_matrix')), 
+                                           nrow = n_patch, ncol = n_patch)
+      network$dispersal_matrix = as.matrix(read.table(paste0(folder_name, '/dispersal_matrix')),
+                                           nrow = n_patch, ncol = n_patch)
+      network$cov_matrix = as.matrix(read.table(paste0(folder_name, '/cov_matrix')),
+                                     nrow = n_patch, ncol = n_patch)
+      
+      return(network)
+    }
+
+  ## plot_network ##########################################################################################
+
+  plot_network = function(network){
+    # extracting the number of patches
+    n_patch = network$summary$n_patch
+    
+    # dataframe of point coordinates
+    points = network$points_coords
+    
+    # making a dataframe of link coordinates
+    links = data.frame(x = 0, y = 0, link = 0, weight = 0)
+    link = 0
+    W = network$dispersal_matrix
+    for(k in 1:(n_patch-1)){
+      for(l in (k+1):n_patch){
+        if(W[k,l]>0){
+          link = link+1
+          temp_data = data.frame(x = points[c(k, l), 1], y = points[c(k,l), 2], link = link, weight = (W[k,l] + W[l,k])/2)
+          links = rbind(links, temp_data)
+        }
+      }
+    }
+    
+    ggplot() +
+      geom_line(data = links, mapping = aes(x = x, y = y, group = link, size = weight), color = "grey") +
+      geom_point(data = points, mapping = aes(x = x, y = y), color = 'black', size = 5) +
+      labs(x="",y="",color="Biomass", size="Weight") +
+      scale_size_continuous(range = c(0.05,1)) +
+      theme_classic() +
+      labs(x="",y="") +
+      theme(axis.text.x = element_blank(),legend.position="bottom",
+            axis.ticks.x = element_blank(),
+            axis.text.y = element_blank(),
+            axis.ticks.y = element_blank(),
+            axis.line = element_line(colour = "white")) +
+      xlim(min(points$x) - 0.1, max(points$x) + 0.1) +
+      ylim(min(points$y) - 0.1, max(points$y) + 0.1) +
+      guides(size = "none")
+  }
+
+  ## make_distance_matrix: #######################################################################
+    make_distance_matrix = function(points){
+      # makes a matrix of distance from a dataframe of points coordinates
+      n_patch = nrow(points)
+      distance_matrix = matrix(0, nrow = n_patch, ncol = n_patch)
+      for (k in 1:n_patch){
+        for(l in 1:n_patch){
+          dist = sqrt( (points$x[k]-points$x[l])**2 + (points$y[k]-points$y[l])**2 )
+          distance_matrix[k,l] = dist
+          distance_matrix[l,k] = dist
+        }
+      }
+      return(distance_matrix)
+    }
+  
+    ## make_dispersal_matrix: #######################################################################
+    make_dispersal_matrix = function(adjacency_matrix){
+      # makes a matrix of dispersal from an adjacency matrix
+      n_patch = nrow(adjacency_matrix)
+      
+      disp_matrix = adjacency_matrix
+      
+      for (k in 1:(n_patch)){
+        disp_matrix[,k] = disp_matrix[,k]/sum(disp_matrix[,k])
+      }
+      return(disp_matrix)
+      
+    }
+    
+    
+  ## make_cov_matrix ###################################################################
+    make_cov_matrix = function(network, dist_cov){
+      # makes a matrix of environmental variance/covariance based on the distance between points
+      # dist_cov controls how tightly correlated conditions are: if dist_cov == 0, there is no covariance, if dist_cov == infinity all patches experience the same conditions
+      
+      if (dist_cov == 0){
+        cov_matrix = matrix(rep(0, network$summary$n_patch**2), nrow = network$summary$n_patch, ncol = network$summary$n_patch)
+        for(k in 1:network$summary$n_patch){
+          cov_matrix[k, k] = 1
+        }
+      }
+      else {
+        cov_matrix = dnorm(network$distance, 0, dist_cov)/dnorm(0, 0, dist_cov)
+      }
+      
+      return(cov_matrix)
+    }
+  
+  ## randomize_link_strength ############################################################
+    
+    randomize_link_strength = function(matrix, sd = 0.1){
+      # randomizes the strengths of links in a matrix: positive links are multiplied by a gaussian (1, sd) and null links stay null
+      
+      # extracting the matrix dimension
+      n = nrow(matrix)
+      p = ncol(matrix)
+      
+      # making a matrix of noise
+      noise = matrix(rnorm(n*p, 1, sd), nrow = n, ncol = p)
+      # filtering negative values
+      noise = noise * (noise > 0)
+      
+      # pairwise multiplication
+      output = matrix*noise
+      
+      return(output)
+    }
+    
+    
+    
+# RGGs #######################################################################################################
+    # functions to generate RGG (random geometric graphs). only the last function ('make_RGG') should be called, the other are internal functions called by make_RGG
+
+  ## Internal functions ##########################################################################
+  draw_positions = function(n_patch){
+    # draws the positions of n_patch patches uniformly in a 1x1 square space
+    # values: a "network" with the following attributes
+    #   $summary: a dataframe with various info on the landscape
+    #   $points_coords: a dataframe with the coordinates (x, y) of each point
+    #   $distance_matrix: a matrix of the distance between each patch
+    points = data.frame(x = runif(n_patch, 0, 1), y = runif(n_patch, 0, 1))
+    
+    distance_matrix = make_distance_matrix(points)
+    
+    network = list()
+    
+    network$summary = data.frame(kind = "RGG", n_patch = n_patch)
+    network$points_coords = points
+    network$distance_matrix = distance_matrix
+    return(network)
+  }
+
+  make_RGG_adjacency_matrix = function(network, c, steps = 100){
+    # takes a 'network' (i.e. the output of 'draw_positions') and connects patches to make an adjacency matrix of connectivity c
+    # c: target connectivity (number of links per patch)
+    # steps: number of prospected threshold distance to reach this connectivity (more steps = more precise)
+    
+    # values: a "network" with the following attributes
+    #   $summary: a dataframe with various info on the landscape
+    #   $points_coords: a dataframe with the coordinates (x, y) of each point
+    #   $distance_matrix: a matrix of the distance between each patch
+    #   $adjacency_matrix: the adjacency matrix of the network (1 when patches are connected, 0 when they are not)
+    n_patch = network$summary$n_patch
+    list_threshold = seq(0, sqrt(2), length.out = steps)
+    list_connectivity = rep(0, steps)
+    
+    for (k in 1:steps){
+      dist_threshold = list_threshold[k]
+      adj = network$distance_matrix <= dist_threshold
+      for(l in 1:n_patch){
+        adj[l,l] = 0
+      }
+      
+      list_connectivity[k] = sum(adj)/(2*n_patch)
+      
+    }
+    
+    thr_index = which(abs(list_connectivity-c) == min(abs(list_connectivity-c)))[1]
+    thr = list_threshold[thr_index]
+    
+    adj = network$distance_matrix <= thr
+    for(l in 1:n_patch){
+      adj[l,l] = 0
+    }
+    
+    network$adjacency_matrix = adj
+    network$summary$"threshold_distance" = thr
+    
+    return(network)
+  }
+  
+  
+  ## RGG generator ###########################################################################################
+  make_RGG = function(n_patch, c, dist_cov = 0, steps = 100){
+    ## creates an RGG with 'n_patch' patches and an average connectivity 'c' and an a variance/covariance matrix based on
+    ## distance.
+    network = draw_positions(n_patch)
+    network = make_RGG_adjacency_matrix(network, c, steps)
+    while (is_connected(graph_from_adjacency_matrix(network$adjacency_matrix)) != T){
+      network = draw_positions(n_patch)
+      network = make_RGG_adjacency_matrix(network, c, steps)
+    }
+    
+    network$dispersal_matrix = make_dispersal_matrix(network$adjacency_matrix)
+    
+    network$cov_matrix = make_cov_matrix(network, dist_cov)
+    network$summary$covariance_distance = dist_cov
+    
+    return(network)
+  }
+  
+
+# OCN (Riverine) ############################################################################################
+  
+  make_OCN = function(n_patch, dist_cov = 0){
+    network = list()
+    network$summary = data.frame(kind = 'OCN', n_patch = n_patch, covariance_distance = dist_cov)
+    
+    # creating an optimal channel network and checking that we get the correct number of patches
+    OCN <- create_OCN(20, 20, outletPos = 1, cellsize = 500)
+    OCN <- landscape_OCN(OCN, slope0 = 0.01)
+    
+    thr <- find_area_threshold_OCN(OCN)
+    
+    indThr <- which(abs(thr$nNodesAG - n_patch) == min(abs(thr$nNodesAG - n_patch)))
+    indThr <- max(indThr) # pick the last ind_thr that satisfies the condition above
+    thrA <- thr$thrValues[indThr] # corresponding threshold area
+    OCN <- aggregate_OCN(OCN, thrA = thrA)
+    
+    adjacency_matrix = as.matrix(OCN$AG$W)
+    
+    while(nrow(adjacency_matrix) != n_patch){
+      OCN <- create_OCN(20, 20, outletPos = 1, cellsize = 500)
+      OCN <- landscape_OCN(OCN, slope0 = 0.01)
+      
+      thr <- find_area_threshold_OCN(OCN)
+      indThr <- which(abs(thr$nNodesAG - n_patch) == min(abs(thr$nNodesAG - n_patch)))
+      indThr <- max(indThr) # pick the last ind_thr that satisfies the condition above
+      thrA <- thr$thrValues[indThr] # corresponding threshold area
+      OCN <- aggregate_OCN(OCN, thrA = thrA)
+      
+      adjacency_matrix = as.matrix(OCN$AG$W)
+    
+    }
+    
+    adjacency_matrix = adjacency_matrix + t(adjacency_matrix)
+     
+    
+    # extracting the coordinates and getting them between 0-1:
+    network$points_coords = data.frame(x = OCN$AG$X, y = OCN$AG$Y)
+    network$points_coords = network$points_coords/max(network$points_coords)
+    
+    # getting the distance matrix
+    network$distance_matrix = make_distance_matrix(network$points_coords)
+    
+    # getting the adjacency matrix
+    network$adjacency_matrix = adjacency_matrix
+    
+    # getting the dispersal matrix
+    network$dispersal_matrix = make_dispersal_matrix(network$adjacency_matrix)
+    
+    # getting the covariance matrix
+    network$cov_matrix = make_cov_matrix(network, dist_cov)
+    network$summary$covariance_distance = dist_cov
+    
+    return(network)
+  }
+  
+  
+# Erdos-Renyi ########################################################################################
+  
+  erdos_renyi_adj = function(n_patch, c){
+    # returns an adjacency matrix (0, 1) where patches are connected randomly to get an average connectivity of c
+    output = matrix(rep(0, n_patch**2), nrow = n_patch)
+    p = c/(n_patch - 1)
+    for (k in 1:(n_patch-1)){
+      for(l in (k+1):n_patch){
+        if(runif(1, 0, 1) < p){
+          output[k,l] = 1
+          output[l,k] = 1
+        }  
+      }
+    }
+    return(output)
+  }
+  
+  
+  make_erdos_renyi = function(n_patch, c, covariance_distance = 0){
+    # creates an erdos-renyi network with 'n_patch' patches and an average connectivity of 'c'
+    
+    # note that this function returns a distance matrix and a variance-covariance matrix
+    # for consistency with the other landscape-generating functions, but the points have
+    # no real position so the distance matrix is a dummy and the covariance matrix
+    # with 0 outside the diagonal
+    # the points_coords are taken from igraph plotting and do not reflect real positions but are useful for plotting.
+    
+    network = list()
+    network$summary = data.frame(kind = 'Erdos-Renyi', n_patch = n_patch, covariance_distance = 0)
+    
+    # making a dummy distance matrix:
+    distance_matrix = matrix(rep(NaN, n_patch**2), nrow = n_patch)
+    
+    # Making an adjacency matrix and checking that it is connected
+    adjacency_matrix = erdos_renyi_adj(n_patch, c)
+    while (is_connected(graph_from_adjacency_matrix(adjacency_matrix)) != T){
+      adjacency_matrix = erdos_renyi_adj(n_patch, c)
+    }
+    
+    ## drawing some random positions (unrelated to the network connectivity)
+    network$points_coords = draw_positions(n_patch)$points_coords
+    
+    
+    # getting the distance matrix
+    network$distance_matrix = make_distance_matrix(network$points_coords)
+    
+    # getting the adjacency matrix
+    network$adjacency_matrix = adjacency_matrix
+    
+    # getting the dispersal matrix
+    network$dispersal_matrix = make_dispersal_matrix(network$adjacency_matrix)
+    
+    # getting the covariance matrix
+    network$cov_matrix = make_cov_matrix(network, covariance_distance)
+    
+    return(network)
+    
+  }
+  
+  
+  
+  
