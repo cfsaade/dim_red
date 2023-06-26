@@ -1,0 +1,13 @@
+http://www.tlhiv.org/ltxpreview/
+
+\begin{align*}
+\dfrac{dx_1}{dt} &= f(x_1, ...,  x_n) + x_1 \xi_1\\
+... &\\
+... &\\
+... &\\
+\dfrac{dx_n}{dt} &= f(x_1, ...,  x_n) + x_n \xi_n
+\end{align*}
+
+\begin{align*}
+\dfrac{dR}{dt} &= f(R) + R \xi_R\\
+\end{align*}

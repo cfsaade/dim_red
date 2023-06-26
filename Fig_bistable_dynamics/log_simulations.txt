@@ -1,0 +1,278 @@
+
+R version 4.1.2 (2021-11-01) -- "Bird Hippie"
+Copyright (C) 2021 The R Foundation for Statistical Computing
+Platform: x86_64-pc-linux-gnu (64-bit)
+
+R is free software and comes with ABSOLUTELY NO WARRANTY.
+You are welcome to redistribute it under certain conditions.
+Type 'license()' or 'licence()' for distribution details.
+
+  Natural language support but running in an English locale
+
+R is a collaborative project with many contributors.
+Type 'contributors()' for more information and
+'citation()' on how to cite R or R packages in publications.
+
+Type 'demo()' for some demos, 'help()' for on-line help, or
+'help.start()' for an HTML browser interface to help.
+Type 'q()' to quit R.
+
+> # a script that tests the one-dimensional spectral reduction over a list of networks
+> 
+> # sources and libraries ####################################################################
+> rm(list = ls())
+> library(deSolve)
+> library(igraph)
+
+Attaching package: ‘igraph’
+
+The following objects are masked from ‘package:stats’:
+
+    decompose, spectrum
+
+The following object is masked from ‘package:base’:
+
+    union
+
+> library(parallel)
+> library(stats)
+> library(pracma)
+
+Attaching package: ‘pracma’
+
+The following object is masked from ‘package:deSolve’:
+
+    rk4
+
+> 
+> # functions for the reduction
+> source("../one_dimension_spectral_reduction.R")
+> 
+> # functions for dynamics
+> source("../Dynamics/metapop_dynamics.R")
+> source("../Dynamics/Growth_functions.R")
+> source("../Dynamics/Dispersal_functions.R")
+> source("../Networks/Network_functions.R")
+> 
+> 
+> # creating output directories ###############################################################
+> dir.create("output")
+Warning message:
+In dir.create("output") : 'output' already exists
+> 
+> # declaring fixed parameters ######################################################################
+> 
+> # demographic properties
+> r = 1
+> baseline_K = 30
+> 
+> k_sd = 0 # variation of local K's
+> 
+> n_rep = 3 # number of replicates
+> 
+> # main function, to loop over networks ######################################################
+> 
+> benchmark = function(par_list){
++   network_id = par_list[1]
++   
++   print(network_id)
++   
++   t = seq(0, 1000, 1) # time seq for integration
++   
++   network = read_network(paste0("Network_list/", network_id))
++   disp_matrix = network$dispersal_matrix
++   n_patch = ncol(disp_matrix)
++   
++   
++   data = data.frame(network_id = '',
++                     kind = network$summary$kind,
++                     rep = 0,
++                     mu = 0,
++                     c = 0,
++                     
++                     # odsr parameters
++                     alpha = 0,
++                     alpha.out = 0,
++                     beta = 0,
++                     eigen.ratio = 0, # ratio of the first two eigen values
++                     
++                     R_init = 0, # reduction of the initial state
++                     
++                     # averages of the time series
++                     R_predicted = 0, # predicted reduction
++                     x_bar = 0, # average equilibrium
++                     x_reduced = 0, # reduced eq
++                     R_alternative_1 = 0,
++                     R_alternative_2 = 0) # value of mathematically determined equilibria
++ 
++                       
++   #for (rep in 1:3){ # we replicate different initial conditions for each network
++    for (rep in 1:n_rep){
++     K_vect = rnorm(n_patch, baseline_K, baseline_K * k_sd)
++     K_vect = K_vect * (K_vect > 0)
++     
++     for (c in c(0.1, 0.5, 0.9)){ # looping over allee effect threshold
++       # declaring parameters for the integration
++       par = list(r = 1,
++                  K = K_vect,
++                  c = c)
++       for (mu in seq(0.01, 1, length.out = 10)){# looping over dispersal rates
++         W = disp_matrix*mu # scaling the disp_matrix by mu
++         
++         odsr.object = odsr(W) # computing the one dimensional spectral reduction
++         
++         if (Re(odsr.object$alpha) < 0 ){
++           odsr.object = odsr(W, n_eig = 2)
++         }
++         
++         odsr.object$a = sapply(odsr.object$a, Re)
++         odsr.object$alpha = Re(odsr.object$alpha)
++         odsr.object$alpha.out = Re(odsr.object$alpha.out)
++         odsr.object$beta = Re(odsr.object$beta)
++         
++         for (avg_init_density in seq(0.05, 0.95, length.out = 10)){
++           # generating inital density using a lognormal distribution of mean m = baseline_K*avg
++           # and sd = s = 0.3
++           m <- avg_init_density
++           s <- 0.3
++           location <- log(m^2 / sqrt(s^2 + m^2))
++           shape <- sqrt(log(1 + (s^2 / m^2)))
++           x_init = rlnorm(n_patch, location, shape)*baseline_K
++           
++           
++           out = ode(y = x_init,
++                     times = t,
++                     func = metapop_dynamics,
++                     parms = par,
++                     growth_function = logistic_allee,
++                     dispersal_function = linear_dispersal,
++                     W = W)
++           
++           odsr.out = odsr.dynamics(times = t,
++                                    x = x_init,
++                                    growth_function = logistic_allee,
++                                    dispersal_function = linear_dispersal,
++                                    odsr.object = odsr.object,
++                                    par = par)
++           
++           
++           R = odsr.out[nrow(odsr.out),2]
++           
++           eq_density = out[nrow(out), 2:(n_patch+1)]
++           
++           x_bar = mean(eq_density)
++           x_reduced = t(odsr.object$a)%*%eq_density
++           
++           
++           # computing whether reduction predicts another equilibrium
++           par_find_zeros = par
++           for (k in 1:length(par)){
++             par_find_zeros[[k]] = sum(odsr.object$a*par[[k]])
++           }
++           # defining a dummy function to give to find zeros:
++           dummy = function(R){
++             return(unlist(odsr.derivative.deterministic(t = 1,
++                                                         R,
++                                                         growth_function = logistic_allee,
++                                                         dispersal_function = linear_dispersal,
++                                                         odsr.object = odsr.object,
++                                                         par = par_find_zeros)))
++           }
++           alt_eq = findzeros(f = dummy, a = 0, b = baseline_K*2)
++           
++           if (length(alt_eq) == 3){
++             R_alt_1 = alt_eq[1]
++             R_alt_2 = alt_eq[3]
++           } else {
++             R_alt_1 = R
++             R_alt_2 = R
++           }
++           
++           
++           temp_data = data.frame(network_id = network_id,
++                                  kind = network$summary$kind,
++                                  rep = rep,
++                                  mu = mu,
++                                  c = c,
++                                  
++                                  # odsr parameters
++                                  alpha = odsr.object$alpha,
++                                  alpha.out = odsr.object$alpha.out,
++                                  beta = odsr.object$beta,
++                                  eigen.ratio = abs(odsr.object$alpha/odsr.object$eigenvalues[2]), # ratio of the first two eigen values
++                                  
++                                  R_init = t(odsr.object$a)%*%x_init, # reduction of the initial state
++                                  
++                                  # averages of the time series
++                                  R_predicted = R, # predicted reduction
++                                  x_bar = x_bar, # average equilibrium
++                                  x_reduced = x_reduced, # reduced eq
++                                  R_alternative_1 = R_alt_1,
++                                  R_alternative_2 = R_alt_2)
++           
++           
++           data = rbind(data, temp_data)
++         }
++       }
++     } 
++   } 
++   write.table(data[-1,], paste("./output/", network_id, ".csv", sep = ""))
++   return(data[-1,])
++ }
+> 
+> # looping over all landscapes ######################################################################################################################
+> 
+>  ## generating parameters list ###########################################################################
+>   par_list = list()
+>   
+>   index = 1
+>   for(network_id in list.dirs('./Network_list', full.names = FALSE)[-1]){
++       par_list[[index]] = c(network_id)
++       index = index+1 
++   }
+> 
+>   ## looping in parallel ##################################################################################
+>   
+>   out = mclapply(par_list, benchmark, mc.cores = 6, mc.silent = F)
+[1] "ER_1"
+[1] "ER_10"
+[1] "ER_2"
+[1] "ER_3"
+[1] "ER_4"
+[1] "ER_5"
+[1] "ER_8"
+[1] "OCN_10"
+[1] "ER_9"
+[1] "ER_7"
+[1] "ER_6"
+[1] "OCN_1"
+[1] "OCN_4"
+[1] "OCN_7"
+[1] "OCN_3"
+[1] "OCN_5"
+[1] "OCN_2"
+[1] "OCN_6"
+[1] "RGG_1"
+[1] "RGG_3"
+[1] "OCN_9"
+[1] "OCN_8"
+[1] "RGG_10"
+[1] "RGG_2"
+[1] "RGG_6"
+[1] "RGG_9"
+[1] "RGG_5"
+[1] "RGG_7"
+[1] "RGG_4"
+[1] "RGG_8"
+>   
+> # Saving the output into a single .csv ####################################################################
+>   
+>   data = out[[1]]
+>   for (k in 2:length(out)){
++     data = rbind(data, out[[k]])
++   }
+>   write.csv(data, './output/0_All_data.csv')
+>   
+>   
+>   
+> 
